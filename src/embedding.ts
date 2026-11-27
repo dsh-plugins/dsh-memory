@@ -239,8 +239,13 @@ async function remote(profile: string, cache: string, options: RemoteEmbeddingOp
       }
       for (const entry of inputs) {
         const text = (purpose === 'query' ? instruction : '') + entry.text
-        if (countTokens(text) > textBudget) {
+        const textTokens = countTokens(text)
+        if (textTokens > textBudget) {
           throw new Error('记忆输入超过远程向量模型的 token 上限')
+        }
+        // 按 Qwen 的 32 像素空间合并单位估算 512 像素帧，给视觉边界留出余量。
+        if (entry.video && textTokens + entry.video.frameCount * 256 + 128 > textBudget) {
+          throw new Error('视频分片及文本预计超过 Qwen 的输入上限，请提高 maxInputTokens 或缩短查询')
         }
         if (!entry.media && !entry.video) {
           texts.push(text)

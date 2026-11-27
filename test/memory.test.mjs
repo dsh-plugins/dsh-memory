@@ -151,7 +151,7 @@ test('reindexes original documents with Qwen while the active index remains sear
 })
 
 test('samples real video for remote writes and searches instead of sending the whole file', { skip: !videoFixture }, async t => {
-  const { qwen, calls, open } = await fixture(t)
+  const { qwen, calls, open, profile } = await fixture(t)
   const memory = open({ ...qwen, video: videoTools })
   const body = await readFile(videoFixture)
   const video = await memory.stageMedia({ bytes: body, mimeType: 'video/mp4', name: 'sample.mp4' })
@@ -164,6 +164,11 @@ test('samples real video for remote writes and searches instead of sending the w
   assert(matches.some(item => item.documentId === doc.documentId && /视频 0\.0–12\.0 秒/u.test(item.fragment)))
   assert(matches.some(item => item.documentId === doc.documentId && /视频 12\.0–/u.test(item.fragment)))
   assert.deepEqual(Buffer.from((await memory.readMedia(video.assetId)).bytes), body)
+  const smaller = join(profile, 'short-context')
+  await mkdir(smaller)
+  const limited = open({ embedding: { ...qwen.embedding, maxInputTokens: 256 }, video: videoTools }, smaller)
+  const limitedVideo = await limited.stageMedia({ bytes: body, mimeType: 'video/mp4' })
+  await assert.rejects(limited.search({ query: 'alpha', assetId: limitedVideo.assetId }), /视频分片及文本预计超过/u)
 })
 
 test('keeps the previous index and persisted safe options when a candidate fails', async t => {
