@@ -28,7 +28,7 @@ async function fixture(t) {
     writeFile(join(tokenizerDirectory, 'tokenizer_config.json'), JSON.stringify({ unk_token: '[UNK]' })),
   ])
   const calls = []
-  const result = { broken: false }
+  const result = { broken: false, afterEmbedding: undefined }
   const server = createServer(async (request, response) => {
     const parts = []
     for await (const part of request) {
@@ -44,6 +44,7 @@ async function fixture(t) {
       return { index, embedding: result.broken ? vector.slice(0, 2) : vector }
     })
     response.setHeader('content-type', 'application/json')
+    result.afterEmbedding?.()
     response.end(JSON.stringify({ data: data.reverse() }))
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
@@ -165,4 +166,25 @@ test('migrates the profile database and retains acknowledged chat media past sta
   assert.deepEqual(Array.from((await reopened.readMedia(retained)).bytes), [10])
   assert.equal(await reopened.readMedia(expires), undefined)
   await assert.rejects(reopened.pinMedia([expires]), /过期/u)
+})
+
+test('rejects a write when authorization is revoked during embedding', async t => {
+  const { bge, result, open } = await fixture(t)
+  const memory = open(bge)
+  const draft = { title: 'alpha', body: 'alpha' }
+  let allowed = true
+  result.afterEmbedding = () => { allowed = false }
+  const authorize = () => {
+    if (!allowed) {
+      throw new Error('authorization revoked')
+    }
+  }
+  await assert.rejects(memory.write(draft, 'revoked-task', authorize), /authorization revoked/u)
+  result.afterEmbedding = undefined
+  assert.deepEqual(await memory.search({ query: 'alpha' }), [])
+  allowed = true
+  const { documentId } = await memory.write(draft, 'revoked-task', authorize)
+  assert.equal((await memory.get(documentId)).title, draft.title)
+  allowed = false
+  await assert.rejects(memory.write(draft, 'revoked-task', authorize), /authorization revoked/u)
 })

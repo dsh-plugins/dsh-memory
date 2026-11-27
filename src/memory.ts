@@ -159,8 +159,9 @@ export class Memory implements PrismMemory {
     return passages.map((item, index) => ({ text: item.text, vector: vectors[index] }))
   }
 
-  write(draft: MemoryDraft, idempotencyKey: string): Promise<{ documentId: string }> {
+  write(draft: MemoryDraft, idempotencyKey: string, authorize?: () => void): Promise<{ documentId: string }> {
     return this.run(async () => {
+      authorize?.()
       const requestKey = boundedText(idempotencyKey, 256, 'idempotencyKey')
       const title = boundedText(draft.title, 1024, 'title').trim()
       const body = boundedText(draft.body, documentBytes, 'body', true)
@@ -186,7 +187,7 @@ export class Memory implements PrismMemory {
       for (const ref of doc.attachments) {
         this.media(ref.assetId)
       }
-      const documentId = this.database.save(doc, requestKey, digest, model.fingerprint, fragments)
+      const documentId = this.database.save(doc, requestKey, digest, model.fingerprint, fragments, authorize)
       return { documentId }
     })
   }

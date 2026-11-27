@@ -144,10 +144,12 @@ export class MemoryDatabase {
     })
   }
 
-  save(doc: MemoryDocument, requestKey: string, digest: string, fingerprint: string, fragments: Fragment[]): string {
+  save(doc: MemoryDocument, requestKey: string, digest: string, fingerprint: string, fragments: Fragment[],
+    authorize?: () => void): string {
     return this.transaction(() => {
       const previous = this.previous(requestKey, digest)
       if (previous) {
+        authorize?.()
         return previous
       }
       this.db.prepare('INSERT INTO documents (id, request_key, content_digest, title, body) VALUES (?, ?, ?, ?, ?)')
@@ -157,6 +159,7 @@ export class MemoryDatabase {
         attach.run(doc.documentId, ordinal, asset.assetId, asset.description ?? null)
       }
       this.insertFragments(doc.documentId, fingerprint, fragments)
+      authorize?.()
       return doc.documentId
     })
   }
