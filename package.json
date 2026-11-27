@@ -1,0 +1,44 @@
+{
+  "name": "@dsh-prism/dsh-memory",
+  "version": "0.1.0",
+  "description": "Search and write Prism memories across workspaces with SQLite and local or remote embeddings.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": ["dist", "!dist/*.tsbuildinfo", "cordis.patch.yml", "locale/*.json"],
+  "engines": {
+    "node": ">=24.9.0",
+    "dsh": "0.2.3-alpha.2"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.release.json",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@huggingface/tokenizers": "0.2.0"
+  },
+  "optionalDependencies": {
+    "onnxruntime-node": "1.31.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.2.0-alpha.1",
+    "@types/node": "24.10.1",
+    "typescript": "6.0.3"
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dsh-plugins/dsh-memory.git"
+  }
+}

@@ -1,0 +1,133 @@
+import assert from 'node:assert/strict'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import test from 'node:test'
+import { chunkText } from '../dist/chunks.js'
+import { Memory } from '../dist/memory.js'
+
+async function fixture(t) {
+  const profile = await mkdtemp(join(tmpdir(), 'dsh-memory-'))
+  const instances = []
+  const open = (options, directory = profile) => {
+    const instance = new Memory(directory, options)
+    instances.push(instance)
+    return instance
+  }
+  const tokenizerDirectory = join(profile, 'fixture-tokenizer')
+  await mkdir(tokenizerDirectory)
+  const config = {
+    version: '1.0', added_tokens: [], pre_tokenizer: { type: 'WhitespaceSplit' },
+    decoder: null, post_processor: null, normalizer: null,
+    model: { type: 'WordPiece', unk_token: '[UNK]', continuing_subword_prefix: '##', vocab: { '[UNK]': 0, alpha: 1, beta: 2 } },
+  }
+  await Promise.all([
+    writeFile(join(tokenizerDirectory, 'tokenizer.json'), JSON.stringify(config)),
+    writeFile(join(tokenizerDirectory, 'tokenizer_config.json'), JSON.stringify({ unk_token: '[UNK]' })),
+  ])
+  const calls = []
+  const result = { broken: false }
+  const server = createServer(async (request, response) => {
+    const parts = []
+    for await (const part of request) {
+      parts.push(part)
+    }
+    const body = JSON.parse(Buffer.concat(parts).toString('utf8'))
+    calls.push({ url: request.url, body })
+    const input = body.input ?? [body.messages]
+    const data = input.map((value, index) => {
+      const vector = Array(body.dimensions ?? 1024).fill(0)
+      const isBeta = typeof value === 'string' && /beta/u.test(value)
+      vector[isBeta ? 1 : 0] = 1
+      return { index, embedding: result.broken ? vector.slice(0, 2) : vector }
+    })
+    response.setHeader('content-type', 'application/json')
+    response.end(JSON.stringify({ data: data.reverse() }))
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(async () => {
+    await Promise.all(instances.map(instance => instance.close()))
+    server.closeAllConnections()
+    await new Promise(resolve => server.close(resolve))
+    await rm(profile, { recursive: true, force: true })
+  })
+  const baseUrl = `http://127.0.0.1:${server.address().port}/v1`
+  const bge = { embedding: { backend: 'openai', model: 'bge-large-zh-v1.5', baseUrl, tokenizerDirectory, chunkTokens: 32 } }
+  const qwen = { embedding: { backend: 'openai', model: 'Qwen3-VL-Embedding-8B', baseUrl, tokenizerDirectory, dimensions: 64, chunkTokens: 32 } }
+  return { profile, calls, result, bge, qwen, open }
+}
+
+test('splits at model token budgets without changing Unicode or paragraph boundaries', () => {
+  const text = '开头。\n\n' + '🙂中文'.repeat(25) + '\n\n结尾。'
+  const tokens = value => Array.from(value).length
+  const fragments = chunkText(text, 13, tokens)
+  assert.equal(fragments.join(''), text)
+  assert(fragments.every(fragment => tokens(fragment) <= 13))
+  assert(fragments.every(fragment => !/[\uD800-\uDFFF]/u.test(fragment)))
+  assert.throws(() => chunkText('甲', 1, () => 2), /预算/u)
+})
+
+test('persists full documents independently of fragments and deduplicates concurrent writes', async t => {
+  const { profile, bge, calls, open } = await fixture(t)
+  const memory = open(bge)
+  assert.equal(memory.workspace, join(profile, 'data', 'dsh-prism', 'workspace', 'memories'))
+  const body = 'alpha '.repeat(50).trim()
+  const draft = { title: 'alpha', body }
+  const [first, retry] = await Promise.all([
+    memory.write(draft, 'task-a'), memory.write(draft, 'task-a'),
+  ])
+  assert.equal(first.documentId, retry.documentId)
+  await assert.rejects(memory.write({ ...draft, body: 'beta' }, 'task-a'), /不同内容/u)
+  const other = await memory.write({ title: 'beta', body: 'beta' }, 'task-b')
+  const fragments = await memory.search({ query: 'alpha', limit: 2 })
+  assert.equal(fragments.length, 2)
+  assert(fragments.every(item => item.documentId === first.documentId && !Object.hasOwn(item, 'body')))
+  assert(calls.every(call => call.url === '/v1/embeddings'))
+  assert(calls.some(call => call.body.input.length >= 2))
+  await memory.close()
+  const reopened = open(bge)
+  assert.deepEqual(await reopened.get(first.documentId), { documentId: first.documentId, ...draft, attachments: [] })
+  assert.equal((await reopened.search({ query: 'beta', limit: 1 }))[0].documentId, other.documentId)
+  const otherProfile = join(profile, 'second-profile')
+  await mkdir(otherProfile)
+  const independent = open(bge, otherProfile)
+  assert.equal(await independent.get(first.documentId), undefined)
+})
+
+test('reindexes original documents with Qwen and retains image and video assets', async t => {
+  const { bge, qwen, calls, open } = await fixture(t)
+  const textMemory = open(bge)
+  const image = await textMemory.stageMedia({ bytes: Uint8Array.of(1, 2), mimeType: 'image/png', name: 'sample.png' })
+  const video = await textMemory.stageMedia({ bytes: Uint8Array.of(3, 4), mimeType: 'video/mp4' })
+  const doc = await textMemory.write({
+    title: 'alpha', body: '', attachments: [{ assetId: image.assetId, description: 'image' }, { assetId: video.assetId }],
+  }, 'task-media')
+  await assert.rejects(textMemory.search({ assetId: image.assetId }), /Qwen/u)
+  await textMemory.close()
+  const vision = open(qwen)
+  const matches = await vision.search({ query: 'alpha', assetId: image.assetId, limit: 2 })
+  assert(matches.every(item => item.documentId === doc.documentId))
+  assert.equal(matches.length, 2)
+  const messages = calls.flatMap(call => call.body.messages ?? []).flatMap(message => message.content)
+  assert(messages.some(item => item.type === 'image_url' && item.image_url.url === 'data:image/png;base64,AQI='))
+  assert(messages.some(item => item.type === 'video_url' && item.video_url.url === 'data:video/mp4;base64,AwQ='))
+  assert.deepEqual((await vision.get(doc.documentId)).attachments, [
+    { ...image, description: 'image' }, video,
+  ])
+  assert.deepEqual(Array.from((await vision.readMedia(video.assetId)).bytes), [3, 4])
+})
+
+test('rejects invalid embeddings and retries without exposing a partial document', async t => {
+  const { bge, result, open } = await fixture(t)
+  const memory = open(bge)
+  const draft = { title: 'alpha', body: 'alpha' }
+  result.broken = true
+  await assert.rejects(memory.write(draft, 'retry-key'), /维度/u)
+  result.broken = false
+  assert.deepEqual(await memory.search({ query: 'alpha' }), [])
+  const { documentId } = await memory.write(draft, 'retry-key')
+  assert.equal((await memory.get(documentId)).body, draft.body)
+  await assert.rejects(memory.stageMedia({ bytes: Uint8Array.of(1), mimeType: 'text/html' }), /不受支持/u)
+  await assert.rejects(memory.search({ limit: 1 }), /需要文本或媒体/u)
+})

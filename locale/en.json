@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Prism Memory",
+    "description": "Store and retrieve Prism memories across workspaces with SQLite and embeddings."
+  }
+}
