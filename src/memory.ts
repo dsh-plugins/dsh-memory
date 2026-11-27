@@ -4,12 +4,9 @@ import { isAbsolute, join, relative } from 'node:path'
 import { chunkText } from './chunks.js'
 import { MemoryDatabase, type Attachment, type Fragment, type IndexSelection } from './database.js'
 import { createEmbedding, savedEmbeddingOptions, type Embedding, type EmbeddingInput, type EmbeddingOptions } from './embedding.js'
+import { matchesMedia } from './media.js'
 import type { MediaReference, MediaUpload, MemoryDocument, MemoryDraft, MemoryQuery, PrismMemory } from './contracts.js'
 
-const mediaTypes = new Set([
-  'image/jpeg', 'image/png', 'image/webp', 'image/gif',
-  'video/mp4', 'video/webm', 'video/quicktime',
-])
 const documentBytes = 512 * 1024
 const mediaBytes = 16 * 1024 * 1024
 
@@ -140,7 +137,7 @@ export class Memory implements PrismMemory {
 
   async stageMedia(input: MediaUpload): Promise<MediaReference> {
     if (!(input.bytes instanceof Uint8Array) || input.bytes.byteLength === 0 || input.bytes.byteLength > this.assetBytes ||
-        typeof input.mimeType !== 'string' || !mediaTypes.has(input.mimeType)) {
+        typeof input.mimeType !== 'string' || !matchesMedia(input.bytes, input.mimeType)) {
       throw new Error('媒体为空、超过字节上限或格式不受支持')
     }
     const stable = {

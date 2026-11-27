@@ -9,6 +9,9 @@ import test from 'node:test'
 import { chunkText } from '../dist/chunks.js'
 import { Memory } from '../dist/memory.js'
 
+const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+bN9sAAAAASUVORK5CYII=', 'base64')
+const mp4 = Buffer.concat([Buffer.from([0, 0, 0, 16]), Buffer.from('ftypisom'), Buffer.alloc(4)])
+
 async function fixture(t) {
   const profile = await mkdtemp(join(tmpdir(), 'dsh-memory-'))
   const instances = []
@@ -102,8 +105,8 @@ test('persists full documents independently of fragments and deduplicates concur
 test('reindexes original documents with Qwen and retains image and video assets', async t => {
   const { bge, qwen, calls, open, result } = await fixture(t)
   const textMemory = open(bge)
-  const image = await textMemory.stageMedia({ bytes: Uint8Array.of(1, 2), mimeType: 'image/png', name: 'sample.png' })
-  const video = await textMemory.stageMedia({ bytes: Uint8Array.of(3, 4), mimeType: 'video/mp4' })
+  const image = await textMemory.stageMedia({ bytes: png, mimeType: 'image/png', name: 'sample.png' })
+  const video = await textMemory.stageMedia({ bytes: mp4, mimeType: 'video/mp4' })
   const doc = await textMemory.write({
     title: 'alpha', body: '', attachments: [{ assetId: image.assetId, description: 'image' }, { assetId: video.assetId }],
   }, 'task-media')
@@ -138,12 +141,12 @@ test('reindexes original documents with Qwen and retains image and video assets'
   assert(matches.every(item => item.documentId === doc.documentId))
   assert.equal(matches.length, 2)
   const messages = calls.flatMap(call => call.body.messages ?? []).flatMap(message => message.content)
-  assert(messages.some(item => item.type === 'image_url' && item.image_url.url === 'data:image/png;base64,AQI='))
-  assert(messages.some(item => item.type === 'video_url' && item.video_url.url === 'data:video/mp4;base64,AwQ='))
+  assert(messages.some(item => item.type === 'image_url' && item.image_url.url === 'data:image/png;base64,' + png.toString('base64')))
+  assert(messages.some(item => item.type === 'video_url' && item.video_url.url === 'data:video/mp4;base64,' + mp4.toString('base64')))
   assert.deepEqual((await vision.get(doc.documentId)).attachments, [
     { ...image, description: 'image' }, video,
   ])
-  assert.deepEqual(Array.from((await vision.readMedia(video.assetId)).bytes), [3, 4])
+  assert.deepEqual(Buffer.from((await vision.readMedia(video.assetId)).bytes), mp4)
 })
 
 test('keeps the previous index and persisted safe options when a candidate fails', async t => {
@@ -177,13 +180,15 @@ test('rejects invalid embeddings and retries without exposing a partial document
   const { documentId } = await memory.write(draft, 'retry-key')
   assert.equal((await memory.get(documentId)).body, draft.body)
   await assert.rejects(memory.stageMedia({ bytes: Uint8Array.of(1), mimeType: 'text/html' }), /不受支持/u)
+  await assert.rejects(memory.stageMedia({ bytes: png, mimeType: 'image/jpeg' }), /不受支持/u)
+  await assert.rejects(memory.stageMedia({ bytes: Buffer.from('<!doctype html>'), mimeType: 'image/png' }), /不受支持/u)
   await assert.rejects(memory.search({ limit: 1 }), /需要文本或媒体/u)
 })
 
 test('migrates the profile database and retains acknowledged chat media past staging expiry', async t => {
   const { profile, bge, open } = await fixture(t)
   const first = open(bge)
-  const input = { bytes: Uint8Array.of(10), mimeType: 'image/png' }
+  const input = { bytes: png, mimeType: 'image/png' }
   const { assetId: retained } = await first.stageMedia(input)
   const { assetId: expires } = await first.stageMedia(input)
   await first.close()
@@ -209,7 +214,7 @@ test('migrates the profile database and retains acknowledged chat media past sta
   }
   const reopened = open(bge)
   await reopened.stageMedia(input)
-  assert.deepEqual(Array.from((await reopened.readMedia(retained)).bytes), [10])
+  assert.deepEqual(Buffer.from((await reopened.readMedia(retained)).bytes), png)
   assert.equal(await reopened.readMedia(expires), undefined)
   await assert.rejects(reopened.pinMedia([expires]), /过期/u)
 })
