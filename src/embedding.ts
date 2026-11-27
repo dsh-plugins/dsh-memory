@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path'
 import { Tokenizer } from '@huggingface/tokenizers'
 import { bgeWeights, tokenizerFiles } from './model-files.js'
 import type { MediaUpload } from './contracts.js'
+import { videoSamplingRevision, type VideoSegment } from './video.js'
 
 const bge = 'bge-large-zh-v1.5'
 const qwen = 'Qwen3-VL-Embedding-8B'
@@ -39,6 +40,7 @@ export type EmbeddingOptions = LocalEmbeddingOptions | RemoteEmbeddingOptions
 export interface EmbeddingInput {
   text: string
   media?: MediaUpload
+  video?: VideoSegment
 }
 
 /** 当前索引的模型能力。每条结果为单位向量。 */
@@ -46,6 +48,7 @@ export interface Embedding {
   readonly fingerprint: string
   readonly dimensions: number
   readonly supportsMedia: boolean
+  readonly supportsVideo: boolean
   readonly chunkTokens: number
   countTokens(text: string): number
   embed(input: readonly EmbeddingInput[], purpose: 'passage' | 'query'): Promise<Float32Array[]>
@@ -101,13 +104,14 @@ async function local(profile: string, cache: string, options: LocalEmbeddingOpti
     fingerprint: fingerprint('onnx', bge, weights.revision, lexicon.revision, chunkTokens),
     dimensions,
     supportsMedia: false,
+    supportsVideo: false,
     chunkTokens,
     countTokens: text => encode(text).ids.length,
     async embed(inputs, purpose) {
       const vectors: Float32Array[] = []
       for (const input of inputs) {
         signal.throwIfAborted()
-        if (input.media) {
+        if (input.media || input.video) {
           throw new Error('本机 BGE 仅支持文本向量化')
         }
         const { ids, attention_mask, token_type_ids } = encode((purpose === 'query' ? bgeInstruction : '') + input.text)
@@ -150,7 +154,8 @@ export function savedEmbeddingOptions(options: EmbeddingOptions): string {
   let values: Record<string, unknown>
   if (options.backend === 'openai') {
     const { model, modelId, revision, baseUrl, apiKeyEnv, tokenizerDirectory, maxInputTokens, dimensions, chunkTokens } = options
-    values = { backend: options.backend, model, modelId, revision, baseUrl: embeddingUrl(baseUrl), apiKeyEnv, tokenizerDirectory, maxInputTokens, dimensions, chunkTokens }
+    values = { backend: options.backend, model, modelId, revision, baseUrl: embeddingUrl(baseUrl), apiKeyEnv, tokenizerDirectory,
+      maxInputTokens, dimensions, chunkTokens, ...(model === qwen && { videoRevision: videoSamplingRevision }) }
   } else {
     const { backend = 'onnx', modelPath, tokenizerDirectory, chunkTokens } = options
     values = { backend, modelPath, tokenizerDirectory, chunkTokens }
@@ -176,7 +181,8 @@ function responseVectors(body: unknown, count: number, dimensions: number) {
   return vectors
 }
 
-async function remote(profile: string, cache: string, options: RemoteEmbeddingOptions, signal: AbortSignal): Promise<Embedding> {
+async function remote(profile: string, cache: string, options: RemoteEmbeddingOptions, signal: AbortSignal,
+  videoRevision: string | null): Promise<Embedding> {
   if (options.model !== bge && options.model !== qwen) {
     throw new Error('请选择受支持的远程记忆向量模型')
   }
@@ -212,9 +218,11 @@ async function remote(profile: string, cache: string, options: RemoteEmbeddingOp
     return responseVectors(await response.json(), count, dimensions)
   }
   return {
-    fingerprint: fingerprint('openai', options.model, endpoint, model, options.revision, lexicon.revision, dimensions, textBudget, chunkTokens),
+    fingerprint: fingerprint('openai', options.model, endpoint, model, options.revision, lexicon.revision, dimensions,
+      textBudget, chunkTokens, ...(vision && videoRevision !== null ? [videoRevision] : [])),
     dimensions,
     supportsMedia: vision,
+    supportsVideo: vision && videoRevision === videoSamplingRevision,
     chunkTokens,
     countTokens,
     async embed(inputs, purpose) {
@@ -234,7 +242,7 @@ async function remote(profile: string, cache: string, options: RemoteEmbeddingOp
         if (countTokens(text) > textBudget) {
           throw new Error('记忆输入超过远程向量模型的 token 上限')
         }
-        if (!entry.media) {
+        if (!entry.media && !entry.video) {
           texts.push(text)
           if (texts.length === 16) {
             await flush()
@@ -245,9 +253,9 @@ async function remote(profile: string, cache: string, options: RemoteEmbeddingOp
           throw new Error('远程 BGE 仅支持文本向量化')
         }
         await flush()
-        const url = 'data:' + entry.media.mimeType + ';base64,' + Buffer.from(entry.media.bytes).toString('base64')
-        const file = entry.media.mimeType.startsWith('image/')
-          ? { type: 'image_url', image_url: { url } } : { type: 'video_url', video_url: { url } }
+        const file = entry.video
+          ? { type: 'video_url', video_url: { url: entry.video.dataUrl } }
+          : { type: 'image_url', image_url: { url: imageUrl(entry.media) } }
         const [vector] = await submit({
           messages: [{ role: 'user', content: [...(text.trim() ? [{ type: 'text', text }] : []), file] }],
         }, 1)
@@ -260,14 +268,22 @@ async function remote(profile: string, cache: string, options: RemoteEmbeddingOp
   }
 }
 
+function imageUrl(media: MediaUpload | undefined) {
+  if (!media?.mimeType.startsWith('image/')) {
+    throw new Error('视频需要按时间采样后再提交向量化')
+  }
+  return 'data:' + media.mimeType + ';base64,' + Buffer.from(media.bytes).toString('base64')
+}
+
 /** 初始化当前 profile 的向量后端，默认按需准备本机 CPU 模型文件。 */
-export async function createEmbedding(profile: string, options: EmbeddingOptions, signal: AbortSignal): Promise<Embedding> {
+export async function createEmbedding(profile: string, options: EmbeddingOptions, signal: AbortSignal,
+  videoRevision: string | null = videoSamplingRevision): Promise<Embedding> {
   if (options.backend !== undefined && options.backend !== 'openai' && options.backend !== 'onnx') {
     throw new Error('记忆向量后端必须为 onnx 或 openai')
   }
   const vision = options.backend === 'openai' && options.model === qwen
   const cache = join(profile, 'cache', 'dsh-prism', 'models', vision ? qwen : bge)
   return options.backend === 'openai'
-    ? remote(profile, cache, options, signal)
+    ? remote(profile, cache, options, signal, videoRevision)
     : local(profile, cache, options, signal)
 }

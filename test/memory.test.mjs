@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -10,7 +10,11 @@ import { chunkText } from '../dist/chunks.js'
 import { Memory } from '../dist/memory.js'
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+bN9sAAAAASUVORK5CYII=', 'base64')
-const mp4 = Buffer.concat([Buffer.from([0, 0, 0, 16]), Buffer.from('ftypisom'), Buffer.alloc(4)])
+const videoTools = {
+  ffmpegPath: process.env.PRISM_MEMORY_TEST_FFMPEG,
+  ffprobePath: process.env.PRISM_MEMORY_TEST_FFPROBE,
+}
+const videoFixture = process.env.PRISM_MEMORY_TEST_VIDEO
 
 async function fixture(t) {
   const profile = await mkdtemp(join(tmpdir(), 'dsh-memory-'))
@@ -102,13 +106,12 @@ test('persists full documents independently of fragments and deduplicates concur
   assert.equal(await independent.get(first.documentId), undefined)
 })
 
-test('reindexes original documents with Qwen and retains image and video assets', async t => {
+test('reindexes original documents with Qwen while the active index remains searchable', async t => {
   const { bge, qwen, calls, open, result } = await fixture(t)
   const textMemory = open(bge)
   const image = await textMemory.stageMedia({ bytes: png, mimeType: 'image/png', name: 'sample.png' })
-  const video = await textMemory.stageMedia({ bytes: mp4, mimeType: 'video/mp4' })
   const doc = await textMemory.write({
-    title: 'alpha', body: '', attachments: [{ assetId: image.assetId, description: 'image' }, { assetId: video.assetId }],
+    title: 'alpha', body: '', attachments: [{ assetId: image.assetId, description: 'image' }],
   }, 'task-media')
   await assert.rejects(textMemory.search({ assetId: image.assetId }), /Qwen/u)
   await textMemory.close()
@@ -142,11 +145,25 @@ test('reindexes original documents with Qwen and retains image and video assets'
   assert.equal(matches.length, 2)
   const messages = calls.flatMap(call => call.body.messages ?? []).flatMap(message => message.content)
   assert(messages.some(item => item.type === 'image_url' && item.image_url.url === 'data:image/png;base64,' + png.toString('base64')))
-  assert(messages.some(item => item.type === 'video_url' && item.video_url.url === 'data:video/mp4;base64,' + mp4.toString('base64')))
   assert.deepEqual((await vision.get(doc.documentId)).attachments, [
-    { ...image, description: 'image' }, video,
+    { ...image, description: 'image' },
   ])
-  assert.deepEqual(Buffer.from((await vision.readMedia(video.assetId)).bytes), mp4)
+})
+
+test('samples real video for remote writes and searches instead of sending the whole file', { skip: !videoFixture }, async t => {
+  const { qwen, calls, open } = await fixture(t)
+  const memory = open({ ...qwen, video: videoTools })
+  const body = await readFile(videoFixture)
+  const video = await memory.stageMedia({ bytes: body, mimeType: 'video/mp4', name: 'sample.mp4' })
+  const doc = await memory.write({ title: 'alpha', body: '', attachments: [{ assetId: video.assetId }] }, 'video-doc')
+  const matches = await memory.search({ query: 'alpha', assetId: video.assetId, limit: 12 })
+  const clips = calls.flatMap(call => call.body.messages ?? []).flatMap(message => message.content)
+    .filter(item => item.type === 'video_url')
+  assert(clips.length >= 4, 'At least two video segments must be embedded in the document and query')
+  assert(clips.every(item => item.video_url.url.startsWith('data:video/jpeg;base64,')))
+  assert(matches.some(item => item.documentId === doc.documentId && /视频 0\.0–12\.0 秒/u.test(item.fragment)))
+  assert(matches.some(item => item.documentId === doc.documentId && /视频 12\.0–/u.test(item.fragment)))
+  assert.deepEqual(Buffer.from((await memory.readMedia(video.assetId)).bytes), body)
 })
 
 test('keeps the previous index and persisted safe options when a candidate fails', async t => {

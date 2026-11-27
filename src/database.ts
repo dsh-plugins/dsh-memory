@@ -220,18 +220,22 @@ export class MemoryDatabase {
     })
   }
 
-  search(vector: Float32Array, fingerprint: string, limit: number): { documentId: string; fragment: string }[] {
+  search(vectors: readonly Float32Array[], fingerprint: string, limit: number): { documentId: string; fragment: string }[] {
     const best: { documentId: string; fragment: string; score: number }[] = []
     const rows = this.db.prepare('SELECT document_id, text, vector FROM fragments WHERE fingerprint = ? ORDER BY document_id, ordinal')
       .iterate(fingerprint) as Iterable<{ document_id: string; text: string; vector: Uint8Array }>
     for (const row of rows) {
-      if (row.vector.byteLength !== vector.length * 4) {
+      if (vectors.some(vector => row.vector.byteLength !== vector.length * 4)) {
         throw new Error('记忆索引中的向量维度与模型不一致')
       }
       const bytes = new DataView(row.vector.buffer, row.vector.byteOffset, row.vector.byteLength)
-      let score = 0
-      for (let index = 0; index < vector.length; index++) {
-        score += vector[index] * bytes.getFloat32(index * 4, true)
+      let score = -Infinity
+      for (const vector of vectors) {
+        let similarity = 0
+        for (let index = 0; index < vector.length; index++) {
+          similarity += vector[index] * bytes.getFloat32(index * 4, true)
+        }
+        score = Math.max(score, similarity)
       }
       if (best.length < limit || score > best[best.length - 1].score) {
         best.push({ documentId: row.document_id, fragment: row.text, score })

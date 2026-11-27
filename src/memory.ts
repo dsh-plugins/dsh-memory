@@ -5,6 +5,7 @@ import { chunkText } from './chunks.js'
 import { MemoryDatabase, type Attachment, type Fragment, type IndexSelection } from './database.js'
 import { createEmbedding, savedEmbeddingOptions, type Embedding, type EmbeddingInput, type EmbeddingOptions } from './embedding.js'
 import { matchesMedia } from './media.js'
+import { sampleVideo, type VideoOptions } from './video.js'
 import type { MediaReference, MediaUpload, MemoryDocument, MemoryDraft, MemoryQuery, PrismMemory } from './contracts.js'
 
 const documentBytes = 512 * 1024
@@ -14,6 +15,7 @@ const mediaBytes = 16 * 1024 * 1024
 export interface MemoryOptions {
   embedding?: EmbeddingOptions
   maxMediaBytes?: number
+  video?: Omit<VideoOptions, 'signal'>
 }
 
 function boundedText(value: unknown, upTo: number, name: string, optional = false): string {
@@ -41,6 +43,7 @@ export class Memory implements PrismMemory {
   private readonly assetBytes: number
   private readonly profile: string
   private readonly requested: string
+  private readonly video: VideoOptions
   private readonly models = new Map<string, Promise<Embedding>>()
   private initial?: Promise<void>
   private stopping?: Promise<void>
@@ -50,6 +53,7 @@ export class Memory implements PrismMemory {
       throw new Error('DSH 记忆库需要绝对的配置档路径')
     }
     this.profile = realpathSync(profile)
+    this.video = { ...options.video, signal: this.abort.signal }
     this.assetBytes = options.maxMediaBytes ?? mediaBytes
     if (!Number.isSafeInteger(this.assetBytes) || this.assetBytes < 1 || this.assetBytes > 64 * 1024 * 1024) {
       throw new Error('maxMediaBytes 必须在 1 至 67108864 之间')
@@ -103,7 +107,8 @@ export class Memory implements PrismMemory {
     if (model) {
       return model
     }
-    const pending = createEmbedding(this.profile, JSON.parse(options) as EmbeddingOptions, this.abort.signal)
+    const saved = JSON.parse(options) as EmbeddingOptions & { videoRevision?: string }
+    const pending = createEmbedding(this.profile, saved, this.abort.signal, saved.videoRevision ?? null)
     this.models.set(options, pending)
     void pending.catch(() => { this.models.delete(options) })
     return pending
@@ -191,18 +196,27 @@ export class Memory implements PrismMemory {
     const text = doc.body.trim() ? doc.title + '\n\n' + doc.body : doc.title
     const passages: EmbeddingInput[] = chunkText(text, model.chunkTokens, part => model.countTokens(part))
       .filter(part => part.trim()).map(part => ({ text: part }))
+    const fragments: Fragment[] = []
     for (const attachment of doc.attachments) {
       const label = attachment.description ?? attachment.name ?? (attachment.mimeType.startsWith('image/') ? '图片附件' : '视频附件')
       const parts = chunkText(label, model.chunkTokens, part => model.countTokens(part))
+      const video = attachment.mimeType.startsWith('video/')
+      if (video && model.supportsVideo) {
+        for await (const segment of sampleVideo(this.media(attachment.assetId), this.video)) {
+          const [vector] = await model.embed([{ text: parts[0], video: segment }], 'passage')
+          const span = `${(segment.startMs / 1000).toFixed(1)}–${(segment.endMs / 1000).toFixed(1)} 秒`
+          fragments.push({ text: `视频 ${span}\n${parts[0]}`, vector })
+        }
+      }
       for (const [index, text] of parts.entries()) {
-        passages.push({ text, ...(index === 0 && model.supportsMedia && { media: this.media(attachment.assetId) }) })
+        passages.push({ text, ...(index === 0 && model.supportsMedia && !video && { media: this.media(attachment.assetId) }) })
       }
     }
     const vectors = await model.embed(passages, 'passage')
     if (vectors.length !== passages.length || !vectors.length) {
       throw new Error('记忆分片的嵌入结果数量不匹配')
     }
-    return passages.map((item, index) => ({ text: item.text, vector: vectors[index] }))
+    return [...passages.map((item, index) => ({ text: item.text, vector: vectors[index] })), ...fragments]
   }
 
   write(draft: MemoryDraft, idempotencyKey: string, authorize?: () => void): Promise<{ documentId: string }> {
@@ -277,9 +291,23 @@ export class Memory implements PrismMemory {
       if (media && !model.supportsMedia) {
         throw new Error('媒体检索需要远程 Qwen3-VL-Embedding-8B')
       }
-      const [vector] = await model.embed([{ text: query, media }], 'query')
+      let vectors: Float32Array[]
+      if (media?.mimeType.startsWith('video/')) {
+        if (!model.supportsVideo) {
+          throw new Error('当前索引尚未切换到可读取视频分片的版本')
+        }
+        vectors = []
+        for await (const segment of sampleVideo(media, this.video)) {
+          vectors.push(...await model.embed([{ text: query, video: segment }], 'query'))
+        }
+        if (!vectors.length) {
+          throw new Error('视频无法生成可检索的画面')
+        }
+      } else {
+        vectors = await model.embed([{ text: query, media }], 'query')
+      }
       this.abort.signal.throwIfAborted()
-      return this.database.search(vector, model.fingerprint, limit)
+      return this.database.search(vectors, model.fingerprint, limit)
     })
   }
 

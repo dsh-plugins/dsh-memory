@@ -5,6 +5,7 @@ import { Memory, type MemoryOptions } from './memory.js'
 export type { MediaReference, MediaUpload, MemoryDocument, MemoryDraft, MemoryQuery, PrismMemory } from './contracts.js'
 export type { EmbeddingOptions, LocalEmbeddingOptions, RemoteEmbeddingOptions } from './embedding.js'
 export type { MemoryOptions } from './memory.js'
+export type { VideoOptions } from './video.js'
 
 export const name = '@dsh-prism/dsh-memory'
 export const inject = ['profileContext']

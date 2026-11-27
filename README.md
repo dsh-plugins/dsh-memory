@@ -19,7 +19,7 @@ npm pack
 
 默认通过 `onnxruntime-node` 在 CPU 上运行 `bge-large-zh-v1.5`。首次需要生成向量时，插件下载并校验固定版本的 ONNX 文件和 tokenizer，将其缓存到配置档的 `cache/dsh-prism/models/`。ONNX 文件约 327 MB。若已准备本机文件，可配置 `modelPath` 和 `tokenizerDirectory`。词表目录须包含 `tokenizer.json` 和 `tokenizer_config.json`。相对路径以配置档目录为基准。
 
-使用远程模型时，在配置档的 Cordis 补丁中覆盖插件配置。下例使用 `Qwen3-VL-Embedding-8B`，可用文本、暂存图片或视频进行检索。服务器必须支持 vLLM 的 Embeddings `messages` 参数才能接收媒体。
+使用远程模型时，在配置档的 Cordis 补丁中覆盖插件配置。下例使用 `Qwen3-VL-Embedding-8B`，可用文本、暂存图片或视频进行检索。服务器必须支持 vLLM 的 Embeddings `messages` 参数才能接收媒体。视频按 12 秒一段、每秒一帧取样，命中分片会标出时间范围。视频处理需要 PATH 中可用的 FFmpeg 和 ffprobe，也可配置 `video.ffmpegPath` 与 `video.ffprobePath`，已验证 FFmpeg 8.1。
 
 ```yaml
 - id: dsh-memory
