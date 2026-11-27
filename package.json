@@ -10,6 +10,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./client": {
+      "types": "./dist/client/types/index.d.ts",
+      "default": "./dist/client/client.js"
+    },
     "./package.json": "./package.json",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./locale/*.json": "./locale/*.json"
@@ -20,7 +24,7 @@
     "dsh": "0.2.3-alpha.2"
   },
   "scripts": {
-    "build": "tsc -b tsconfig.release.json",
+    "build": "tsc -b tsconfig.release.json && tsc -p tsconfig.client.json && tsdown --config tsdown.client.config.mjs",
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
@@ -29,13 +33,29 @@
   "optionalDependencies": {
     "onnxruntime-node": "1.31.1"
   },
+  "peerDependencies": {
+    "@dsh-plugin/dsh-loader": "^2.0.0-dev.45752173879"
+  },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.2.0-alpha.1",
+    "@deepseek-ai/dsh-client-locale": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-ui-settings": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.3-alpha.2",
+    "@dsh-plugin/dsh-loader": "2.0.0-dev.45752173879",
     "@types/node": "24.10.1",
+    "@types/react": "18.3.31",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "tsdown": "0.22.14",
     "typescript": "6.0.3"
   },
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" }
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "inject": ["@dsh-plugin/dsh-loader", "@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-locale"],
+      "external": ["@dsh-plugin/dsh-loader/client"]
+    }
   },
   "repository": {
     "type": "git",

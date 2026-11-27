@@ -17,23 +17,15 @@ npm pack
 
 ## 配置向量模型
 
-默认通过 `onnxruntime-node` 在 CPU 上运行 `bge-large-zh-v1.5`。首次需要生成向量时，插件下载并校验固定版本的 ONNX 文件和 tokenizer，将其缓存到配置档的 `cache/dsh-prism/models/`。ONNX 文件约 327 MB。若已准备本机文件，可配置 `modelPath` 和 `tokenizerDirectory`。词表目录须包含 `tokenizer.json` 和 `tokenizer_config.json`。相对路径以配置档目录为基准。
+打开 **设置 → 棱镜/记忆**，为当前 DSH 配置档绑定一个嵌入模型。绑定成功并完成初始化后，棱镜立即启用记忆工具和聊天媒体附件。以后每次启动 DSH 都会自动加载已绑定的模型。
 
-使用远程模型时，在配置档的 Cordis 补丁中覆盖插件配置。下例使用 `Qwen3-VL-Embedding-8B`，可用文本、暂存图片或视频进行检索。服务器必须支持 vLLM 的 Embeddings `messages` 参数才能接收媒体。视频按 12 秒一段、每秒一帧取样，命中分片会标出时间范围。视频处理需要 PATH 中可用的 FFmpeg 和 ffprobe，也可配置 `video.ffmpegPath` 与 `video.ffprobePath`，已验证 FFmpeg 8.1。
+- **本地部署**可选 `bge-m3`、`bge-large-zh-v1.5`、`bge-large-en-v1.5` 或 `Qwen3-Embedding-0.6B`。选择模型并确认下载后，设置页显示进度。插件优先从 HF-Mirror 下载，失败后按文件尝试 Hugging Face 官方源。校验通过的词表和 ONNX 文件缓存在 `cache/dsh-prism/models/`，模型通过 `onnxruntime-node` 在 CPU 上运行。 [HF-Mirror](https://hf-mirror.com/)
+- **远程 API**填写 `BASE_URL`、`API_KEY` 和 `MODEL_ID`，确认连接后，插件会发送一条探测请求，验证模型能生成向量并展示实际维度。上下文长度优先采用服务返回的元数据，其次采用已识别模型的上限。若两者都缺失，设置页会标注保守估计值。远程绑定的密钥保存在当前 DSH 配置档的私有数据目录中。
+- 下载或探测失败时可以重试。绑定成功后，来源、模型和连接配置锁定。
 
-```yaml
-- id: dsh-memory
-  config:
-    embedding:
-      backend: openai
-      model: Qwen3-VL-Embedding-8B
-      baseUrl: https://embedding.example.com/v1
-      apiKeyEnv: PRISM_MEMORY_EMBEDDING_KEY
-```
+本机模型和通用远程模型支持文本及媒体描述。若需直接用图片或视频检索，请选择接受 vLLM Embeddings `messages` 参数的 `Qwen3-VL-Embedding-8B` 服务。待嵌入的查询、文档分片和相关媒体会发送到所配置的服务。视频按 12 秒一段、每秒一帧取样，检索结果标出命中时间范围。需要 PATH 中可用的 FFmpeg 和 ffprobe，也可配置 `video.ffmpegPath` 与 `video.ffprobePath`。
 
-要使用远程 BGE，将 `model` 改为 `bge-large-zh-v1.5`。两种远程模型都支持 OpenAI 兼容的文本 Embeddings 请求。可用 `modelId` 设置部署端使用的模型名，用 `revision` 标识同名模型的一次更新。若服务端限制了输入长度，可设置 `maxInputTokens`。使用较低上限时，需为视频帧和文本共同保留输入空间，预计超限的分片会在发送前报错。远程 Qwen 可配置 `dimensions`，值需与服务实际输出一致。选择远程后端时，待嵌入的查询、文档分片和所选媒体会发送到配置的服务。
-
-插件按模型 tokenizer 自动分片。模型或分片配置变化后，插件会在后台为已有文档重建向量索引。重建期间继续使用原索引，完整重建后切换。重建失败时保留原索引，宿主日志会记录失败状态。完整正文和文档 ID 会保留。暂存媒体保留 24 小时。发送成功的聊天附件和记忆文档引用的媒体会继续保存。
+旧配置档的 Cordis `embedding` 设置继续生效，仍支持离线 `modelPath`、`tokenizerDirectory` 和远程 `apiKeyEnv`。已通过设置页绑定的配置档以绑定结果为准。旧版默认模型写入的文档与附件仍保存在原配置档，首次绑定后会按所选模型重建已有索引，保留原文和文档 ID。暂存媒体保留 24 小时，发送成功的聊天附件和记忆文档引用的媒体会继续保存。
 
 ## 验证
 

@@ -1,0 +1,81 @@
+import type { BindingStatus } from './settings-api.js'
+
+const english = {
+  nav: 'Prism/Memory',
+  title: 'Prism memory',
+  source: 'Embedding model source',
+  local: 'Local deployment',
+  remote: 'Remote API',
+  model: 'Embedding model',
+  download: 'Download',
+  connect: 'Connect',
+  cancel: 'Cancel',
+  refresh: 'Refresh status',
+  passwordLocked: 'Locked',
+  passwordOptional: 'Optional if the endpoint allows anonymous access',
+  downloadConfirm: 'Confirm model download',
+  connectConfirm: 'Confirm remote connection',
+  selectedModel: (model: string) => `Selected model: ${model}`,
+  confirmWarning: 'Once the binding succeeds, the source and embedding model are locked to this DSH profile and cannot be changed.',
+  startError: 'Could not submit the binding. Refresh its status and try again.',
+  refreshError: 'Could not read the memory settings.',
+  dimensions: 'Vector dimensions',
+  context: 'Context length',
+  fallbackContext: 'conservative default',
+  tokens: 'tokens',
+  media: 'Media embedding',
+  supported: 'Supported',
+  unsupported: 'Text only',
+  files: (done: number, total: number) => `${done} of ${total} files`,
+  status: {
+    unconfigured: 'Memory tools become available once the embedding model is bound and running.',
+    downloading: 'Downloading the model. You can leave this page while the download continues.',
+    connecting: 'Testing the endpoint and detecting the model capabilities.',
+    initializing: 'Starting memory.',
+    active: 'Memory tools are active.',
+    failed: 'Memory setup failed.',
+  } satisfies Record<BindingStatus, string>,
+}
+
+type Copy = typeof english
+
+const chinese: Copy = {
+  nav: '棱镜/记忆',
+  title: '棱镜记忆',
+  source: '嵌入模型来源',
+  local: '本地部署',
+  remote: '远程API',
+  model: '嵌入模型',
+  download: '下载',
+  connect: '连接',
+  cancel: '取消',
+  refresh: '刷新状态',
+  passwordLocked: '已锁定',
+  passwordOptional: '接口允许匿名访问时可留空',
+  downloadConfirm: '确认下载模型',
+  connectConfirm: '确认连接远程模型',
+  selectedModel: model => `所选模型 ${model}`,
+  confirmWarning: '一经绑定，此 DSH 配置档将锁定嵌入模型及其来源，无法切换。',
+  startError: '无法提交绑定，请刷新状态后重试。',
+  refreshError: '无法读取记忆设置。',
+  dimensions: '向量维度',
+  context: '上下文长度',
+  fallbackContext: '保守默认值',
+  tokens: '词元',
+  media: '媒体嵌入',
+  supported: '支持',
+  unsupported: '仅支持文字',
+  files: (done, total) => `已下载 ${done} / ${total} 个文件`,
+  status: {
+    unconfigured: '绑定并启动嵌入模型后，即可使用记忆工具。',
+    downloading: '正在下载模型，离开此页后下载会继续。',
+    connecting: '正在测试连接并获取模型能力。',
+    initializing: '正在启动记忆。',
+    active: '记忆工具已启用。',
+    failed: '记忆设置失败。',
+  },
+}
+
+export function memoryCopy(language: string): Copy {
+  return /^zh(?:-|$)/i.test(language) ? chinese : english
+}

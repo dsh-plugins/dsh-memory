@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "lib": ["ES2024", "DOM"],
+    "strict": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "jsx": "react-jsx",
+    "outDir": "dist/client/types",
+    "rootDir": "src/client",
+    "types": []
+  },
+  "include": ["src/client/**/*.ts", "src/client/**/*.tsx"]
+}

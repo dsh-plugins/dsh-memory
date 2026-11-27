@@ -18,6 +18,12 @@ export interface MemoryOptions {
   video?: Omit<VideoOptions, 'signal'>
 }
 
+interface RemoteCredential {
+  baseUrl: string
+  modelId: string
+  apiKey: string
+}
+
 function boundedText(value: unknown, upTo: number, name: string, optional = false): string {
   if (typeof value !== 'string' || Buffer.byteLength(value) > upTo || (!optional && !value.trim())) {
     throw new Error(`记忆字段 ${name} 缺失或超过字节上限 ${upTo}`)
@@ -45,10 +51,12 @@ export class Memory implements PrismMemory {
   private readonly requested: string
   private readonly video: VideoOptions
   private readonly models = new Map<string, Promise<Embedding>>()
+  private reindex?: Promise<void>
   private initial?: Promise<void>
   private stopping?: Promise<void>
 
-  constructor(profile: string, options: MemoryOptions = {}, report: (message: string) => void = () => {}) {
+  constructor(profile: string, options: MemoryOptions = {}, report: (message: string) => void = () => {},
+    private readonly credential?: RemoteCredential) {
     if (!isAbsolute(profile)) {
       throw new Error('DSH 记忆库需要绝对的配置档路径')
     }
@@ -77,7 +85,7 @@ export class Memory implements PrismMemory {
       report('棱镜记忆保留当前索引，新的向量模型配置无效')
     }
     if (active && active.options !== this.requested) {
-      void this.run(() => this.buildIndex(this.requested, active)).catch(async () => {
+      this.reindex = this.run(() => this.buildIndex(this.requested, active)).catch(async () => {
         if (this.abort.signal.aborted) {
           return
         }
@@ -108,10 +116,25 @@ export class Memory implements PrismMemory {
       return model
     }
     const saved = JSON.parse(options) as EmbeddingOptions & { videoRevision?: string }
+    if (saved.backend === 'openai' && this.credential && saved.baseUrl === this.credential.baseUrl &&
+        saved.modelId === this.credential.modelId) {
+      saved.apiKey = this.credential.apiKey
+    }
     const pending = createEmbedding(this.profile, saved, this.abort.signal, saved.videoRevision ?? null)
     this.models.set(options, pending)
     void pending.catch(() => { this.models.delete(options) })
     return pending
+  }
+
+  /** 完成已绑定模型的索引初始化，之后才向编排器提供记忆能力。 */
+  initialize(): Promise<void> {
+    return this.run(async () => {
+      await this.reindex
+      await this.activeModel()
+      if (this.database.activeIndex()?.options !== this.requested) {
+        throw new Error('无法启用已绑定模型的记忆索引')
+      }
+    })
   }
 
   private async activeModel(): Promise<Embedding> {
