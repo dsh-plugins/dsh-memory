@@ -3,6 +3,7 @@ import type { MediaReference, MediaUpload, MemoryDocument } from './contracts.js
 
 export type Attachment = { assetId: string; description?: string }
 export type Fragment = { text: string; vector: Float32Array }
+export type IndexSelection = { options: string; fingerprint: string }
 type DocumentRow = { id: string; title: string; body: string }
 type AttachmentRow = { asset_id: string; description: string | null; mime_type: string; name: string | null }
 const mediaLifetime = 24 * 60 * 60 * 1000
@@ -19,7 +20,7 @@ export class MemoryDatabase {
       this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;')
       this.transaction(() => {
         const version = this.db.prepare('PRAGMA user_version').get()?.user_version
-        if (version !== 0 && version !== 1 && version !== 2) {
+        if (version !== 0 && version !== 1 && version !== 2 && version !== 3) {
           throw new Error('当前棱镜记忆库版本不受此插件支持')
         }
         this.db.exec(`
@@ -54,11 +55,16 @@ export class MemoryDatabase {
             vector BLOB NOT NULL,
             PRIMARY KEY (fingerprint, document_id, ordinal)
           ) STRICT;
+          CREATE TABLE IF NOT EXISTS active_index (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            options TEXT NOT NULL,
+            fingerprint TEXT NOT NULL
+          ) STRICT;
         `)
         if (version === 1) {
           this.db.exec('ALTER TABLE media ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1))')
         }
-        this.db.exec('PRAGMA user_version = 2')
+        this.db.exec('PRAGMA user_version = 3')
       })
     } catch (error) {
       this.db.close()
@@ -145,12 +151,16 @@ export class MemoryDatabase {
   }
 
   save(doc: MemoryDocument, requestKey: string, digest: string, fingerprint: string, fragments: Fragment[],
-    authorize?: () => void): string {
+    authorize?: () => void): string | undefined {
     return this.transaction(() => {
       const previous = this.previous(requestKey, digest)
       if (previous) {
         authorize?.()
         return previous
+      }
+      if (this.activeIndex()?.fingerprint !== fingerprint) {
+        authorize?.()
+        return undefined
       }
       this.db.prepare('INSERT INTO documents (id, request_key, content_digest, title, body) VALUES (?, ?, ?, ?, ?)')
         .run(doc.documentId, requestKey, digest, doc.title, doc.body)
@@ -161,6 +171,27 @@ export class MemoryDatabase {
       this.insertFragments(doc.documentId, fingerprint, fragments)
       authorize?.()
       return doc.documentId
+    })
+  }
+
+  activeIndex(): IndexSelection | undefined {
+    return this.db.prepare('SELECT options, fingerprint FROM active_index WHERE id = 1').get() as IndexSelection | undefined
+  }
+
+  activateIndex(expected: IndexSelection | undefined, next: IndexSelection): 'active' | 'changed' | 'incomplete' {
+    return this.transaction(() => {
+      const current = this.activeIndex()
+      if (current?.options !== expected?.options || current?.fingerprint !== expected?.fingerprint) {
+        return 'changed'
+      }
+      if (this.unindexed(next.fingerprint).length > 0) {
+        return 'incomplete'
+      }
+      this.db.prepare(`
+        INSERT INTO active_index (id, options, fingerprint) VALUES (1, ?, ?)
+        ON CONFLICT (id) DO UPDATE SET options = excluded.options, fingerprint = excluded.fingerprint
+      `).run(next.options, next.fingerprint)
+      return 'active'
     })
   }
 

@@ -14,7 +14,7 @@ export function apply(ctx: Context, config: MemoryOptions = {}) {
   if (typeof profile?.dir !== 'string' || !isAbsolute(profile.dir)) {
     throw new Error('DSH 未提供当前配置档目录')
   }
-  const memory = new Memory(profile.dir, config)
+  const memory = new Memory(profile.dir, config, message => ctx.logger.warn(message))
   ctx.provide('prismMemory', memory)
   return () => memory.close()
 }

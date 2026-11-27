@@ -2,8 +2,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, realpathSync } from 'node:fs'
 import { isAbsolute, join, relative } from 'node:path'
 import { chunkText } from './chunks.js'
-import { MemoryDatabase, type Attachment, type Fragment } from './database.js'
-import { createEmbedding, type Embedding, type EmbeddingInput, type EmbeddingOptions } from './embedding.js'
+import { MemoryDatabase, type Attachment, type Fragment, type IndexSelection } from './database.js'
+import { createEmbedding, savedEmbeddingOptions, type Embedding, type EmbeddingInput, type EmbeddingOptions } from './embedding.js'
 import type { MediaReference, MediaUpload, MemoryDocument, MemoryDraft, MemoryQuery, PrismMemory } from './contracts.js'
 
 const mediaTypes = new Set([
@@ -43,11 +43,12 @@ export class Memory implements PrismMemory {
   private readonly database: MemoryDatabase
   private readonly assetBytes: number
   private readonly profile: string
-  private embedding?: Promise<Embedding>
-  private refresh?: Promise<void>
+  private readonly requested: string
+  private readonly models = new Map<string, Promise<Embedding>>()
+  private initial?: Promise<void>
   private stopping?: Promise<void>
 
-  constructor(profile: string, private readonly options: MemoryOptions = {}) {
+  constructor(profile: string, options: MemoryOptions = {}, report: (message: string) => void = () => {}) {
     if (!isAbsolute(profile)) {
       throw new Error('DSH 记忆库需要绝对的配置档路径')
     }
@@ -63,6 +64,30 @@ export class Memory implements PrismMemory {
       throw new Error('棱镜记忆数据库解析到配置档的其他位置')
     }
     this.database = new MemoryDatabase(database)
+    const active = this.database.activeIndex()
+    try {
+      this.requested = savedEmbeddingOptions(options.embedding ?? {})
+    } catch (error) {
+      if (!active) {
+        this.database.close()
+        throw error
+      }
+      this.requested = active.options
+      report('棱镜记忆保留当前索引，新的向量模型配置无效')
+    }
+    if (active && active.options !== this.requested) {
+      void this.run(() => this.buildIndex(this.requested, active)).catch(async () => {
+        if (this.abort.signal.aborted) {
+          return
+        }
+        report('棱镜记忆重建索引失败，继续使用当前索引')
+        const failed = this.models.get(this.requested)
+        if (failed && this.database.activeIndex()?.options !== this.requested) {
+          this.models.delete(this.requested)
+          await failed.then(model => model.close()).catch(() => {})
+        }
+      })
+    }
   }
 
   private run<T>(operation: () => T | Promise<T>): Promise<T> {
@@ -76,13 +101,37 @@ export class Memory implements PrismMemory {
     return promise
   }
 
-  private model(): Promise<Embedding> {
-    if (!this.embedding) {
-      const pending = createEmbedding(this.profile, this.options.embedding ?? {}, this.abort.signal)
-      this.embedding = pending
-      void pending.catch(() => { this.embedding = undefined })
+  private model(options: string): Promise<Embedding> {
+    const model = this.models.get(options)
+    if (model) {
+      return model
     }
-    return this.embedding
+    const pending = createEmbedding(this.profile, JSON.parse(options) as EmbeddingOptions, this.abort.signal)
+    this.models.set(options, pending)
+    void pending.catch(() => { this.models.delete(options) })
+    return pending
+  }
+
+  private async activeModel(): Promise<Embedding> {
+    let active = this.database.activeIndex()
+    if (!active) {
+      if (!this.initial) {
+        const pending = this.buildIndex(this.requested, undefined)
+        this.initial = pending
+        const clear = () => { this.initial = undefined }
+        void pending.then(clear, clear)
+      }
+      await this.initial
+      active = this.database.activeIndex()
+      if (!active) {
+        throw new Error('记忆索引尚未初始化')
+      }
+    }
+    const model = await this.model(active.options)
+    if (model.fingerprint !== active.fingerprint) {
+      throw new Error('当前索引的模型文件已更改，请用新路径或配置修订切换')
+    }
+    return model
   }
 
   get(documentId: string): Promise<MemoryDocument | undefined> {
@@ -181,31 +230,28 @@ export class Memory implements PrismMemory {
           return { ...ref, mimeType, ...(name !== undefined && { name }) }
         }),
       }
-      const model = await this.model()
-      const fragments = await this.fragments(doc, model)
-      this.abort.signal.throwIfAborted()
-      for (const ref of doc.attachments) {
-        this.media(ref.assetId)
+      for (;;) {
+        const model = await this.activeModel()
+        const fragments = await this.fragments(doc, model)
+        this.abort.signal.throwIfAborted()
+        for (const ref of doc.attachments) {
+          this.media(ref.assetId)
+        }
+        const documentId = this.database.save(doc, requestKey, digest, model.fingerprint, fragments, authorize)
+        if (documentId) {
+          return { documentId }
+        }
       }
-      const documentId = this.database.save(doc, requestKey, digest, model.fingerprint, fragments, authorize)
-      return { documentId }
     })
   }
 
-  private reindex(model: Embedding): Promise<void> {
-    if (!this.refresh) {
-      const pending = this.indexBacklog(model)
-      this.refresh = pending
-      const clear = () => { this.refresh = undefined }
-      void pending.then(clear, clear)
+  private async buildIndex(options: string, expected: IndexSelection | undefined): Promise<void> {
+    const model = await this.model(options)
+    if (expected && expected.fingerprint !== model.fingerprint && this.database.unindexed(model.fingerprint).length === 0) {
+      await model.embed([{ text: '棱镜记忆索引校验' }], 'query')
     }
-    return this.refresh
-  }
-
-  private async indexBacklog(model: Embedding): Promise<void> {
-    let missing: string[]
-    while ((missing = this.database.unindexed(model.fingerprint)).length > 0) {
-      for (const id of missing) {
+    for (;;) {
+      for (const id of this.database.unindexed(model.fingerprint)) {
         this.abort.signal.throwIfAborted()
         const doc = this.database.get(id)
         if (!doc) {
@@ -214,6 +260,10 @@ export class Memory implements PrismMemory {
         const chunks = await this.fragments(doc, model)
         this.abort.signal.throwIfAborted()
         this.database.index(id, model.fingerprint, chunks)
+      }
+      this.abort.signal.throwIfAborted()
+      if (this.database.activateIndex(expected, { options, fingerprint: model.fingerprint }) !== 'incomplete') {
+        return
       }
     }
   }
@@ -226,12 +276,11 @@ export class Memory implements PrismMemory {
       if ((!query.trim() && !media) || !Number.isSafeInteger(limit) || limit < 1 || limit > 20) {
         throw new Error('记忆检索需要文本或媒体，结果数量须在 1 至 20 之间')
       }
-      const model = await this.model()
+      const model = await this.activeModel()
       if (media && !model.supportsMedia) {
         throw new Error('媒体检索需要远程 Qwen3-VL-Embedding-8B')
       }
       const [vector] = await model.embed([{ text: query, media }], 'query')
-      await this.reindex(model)
       this.abort.signal.throwIfAborted()
       return this.database.search(vector, model.fingerprint, limit)
     })
@@ -243,8 +292,8 @@ export class Memory implements PrismMemory {
       this.stopping = (async () => {
         await Promise.allSettled([...this.pending])
         try {
-          const model = await this.embedding?.catch(() => undefined)
-          await model?.close()
+          const models = await Promise.allSettled(this.models.values())
+          await Promise.allSettled(models.flatMap(model => model.status === 'fulfilled' ? [model.value.close()] : []))
         } finally {
           this.database.close()
         }

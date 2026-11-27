@@ -145,6 +145,22 @@ function embeddingUrl(base: string) {
   return endpoint.toString()
 }
 
+/** 只持久化可重建模型的公开选项，密钥值始终由运行进程提供。 */
+export function savedEmbeddingOptions(options: EmbeddingOptions): string {
+  let values: Record<string, unknown>
+  if (options.backend === 'openai') {
+    const { model, modelId, revision, baseUrl, apiKeyEnv, tokenizerDirectory, maxInputTokens, dimensions, chunkTokens } = options
+    values = { backend: options.backend, model, modelId, revision, baseUrl: embeddingUrl(baseUrl), apiKeyEnv, tokenizerDirectory, maxInputTokens, dimensions, chunkTokens }
+  } else {
+    const { backend = 'onnx', modelPath, tokenizerDirectory, chunkTokens } = options
+    values = { backend, modelPath, tokenizerDirectory, chunkTokens }
+  }
+  if (Object.values(values).some(value => value !== undefined && typeof value !== 'string' && typeof value !== 'number')) {
+    throw new Error('记忆向量配置包含无法保存的值')
+  }
+  return JSON.stringify(values)
+}
+
 function responseVectors(body: unknown, count: number, dimensions: number) {
   if (!body || typeof body !== 'object' || !('data' in body) || !Array.isArray(body.data) || body.data.length !== count) {
     throw new Error('向量服务返回的条目数量不匹配')

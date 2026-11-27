@@ -4,6 +4,7 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { setTimeout as wait } from 'node:timers/promises'
 import test from 'node:test'
 import { chunkText } from '../dist/chunks.js'
 import { Memory } from '../dist/memory.js'
@@ -11,8 +12,8 @@ import { Memory } from '../dist/memory.js'
 async function fixture(t) {
   const profile = await mkdtemp(join(tmpdir(), 'dsh-memory-'))
   const instances = []
-  const open = (options, directory = profile) => {
-    const instance = new Memory(directory, options)
+  const open = (options, directory = profile, report) => {
+    const instance = new Memory(directory, options, report)
     instances.push(instance)
     return instance
   }
@@ -28,7 +29,7 @@ async function fixture(t) {
     writeFile(join(tokenizerDirectory, 'tokenizer_config.json'), JSON.stringify({ unk_token: '[UNK]' })),
   ])
   const calls = []
-  const result = { broken: false, afterEmbedding: undefined }
+  const result = { broken: false, failedModel: undefined, beforeEmbedding: undefined, afterEmbedding: undefined }
   const server = createServer(async (request, response) => {
     const parts = []
     for await (const part of request) {
@@ -36,12 +37,13 @@ async function fixture(t) {
     }
     const body = JSON.parse(Buffer.concat(parts).toString('utf8'))
     calls.push({ url: request.url, body })
+    await result.beforeEmbedding?.(body)
     const input = body.input ?? [body.messages]
     const data = input.map((value, index) => {
       const vector = Array(body.dimensions ?? 1024).fill(0)
       const isBeta = typeof value === 'string' && /beta/u.test(value)
       vector[isBeta ? 1 : 0] = 1
-      return { index, embedding: result.broken ? vector.slice(0, 2) : vector }
+      return { index, embedding: result.broken || result.failedModel === body.model ? vector.slice(0, 2) : vector }
     })
     response.setHeader('content-type', 'application/json')
     result.afterEmbedding?.()
@@ -98,7 +100,7 @@ test('persists full documents independently of fragments and deduplicates concur
 })
 
 test('reindexes original documents with Qwen and retains image and video assets', async t => {
-  const { bge, qwen, calls, open } = await fixture(t)
+  const { bge, qwen, calls, open, result } = await fixture(t)
   const textMemory = open(bge)
   const image = await textMemory.stageMedia({ bytes: Uint8Array.of(1, 2), mimeType: 'image/png', name: 'sample.png' })
   const video = await textMemory.stageMedia({ bytes: Uint8Array.of(3, 4), mimeType: 'video/mp4' })
@@ -107,8 +109,32 @@ test('reindexes original documents with Qwen and retains image and video assets'
   }, 'task-media')
   await assert.rejects(textMemory.search({ assetId: image.assetId }), /Qwen/u)
   await textMemory.close()
+  const candidateStarted = Promise.withResolvers()
+  const releaseCandidate = Promise.withResolvers()
+  result.beforeEmbedding = async body => {
+    if (body.model === qwen.embedding.model) {
+      candidateStarted.resolve()
+      await releaseCandidate.promise
+    }
+  }
   const vision = open(qwen)
-  const matches = await vision.search({ query: 'alpha', assetId: image.assetId, limit: 2 })
+  try {
+    await Promise.race([candidateStarted.promise, wait(2000).then(() => { throw new Error('background index did not start') })])
+    assert.equal((await vision.search({ query: 'alpha', limit: 1 }))[0].documentId, doc.documentId)
+    assert.notEqual((await vision.write({ title: 'beta', body: 'beta' }, 'during-index')).documentId, doc.documentId)
+  } finally {
+    releaseCandidate.resolve()
+  }
+  let matches
+  for (let attempt = 0; !matches && attempt < 25; attempt++) {
+    try {
+      matches = await vision.search({ query: 'alpha', assetId: image.assetId, limit: 2 })
+    } catch (error) {
+      assert.match(error.message, /Qwen/u)
+      await wait(50)
+    }
+  }
+  assert(matches, 'The Qwen index never became active')
   assert(matches.every(item => item.documentId === doc.documentId))
   assert.equal(matches.length, 2)
   const messages = calls.flatMap(call => call.body.messages ?? []).flatMap(message => message.content)
@@ -118,6 +144,26 @@ test('reindexes original documents with Qwen and retains image and video assets'
     { ...image, description: 'image' }, video,
   ])
   assert.deepEqual(Array.from((await vision.readMedia(video.assetId)).bytes), [3, 4])
+})
+
+test('keeps the previous index and persisted safe options when a candidate fails', async t => {
+  const { profile, bge, qwen, open, result } = await fixture(t)
+  const original = open({ embedding: { ...bge.embedding, apiKey: 'do-not-persist-this' } })
+  const doc = await original.write({ title: 'alpha', body: 'alpha' }, 'original-document')
+  await original.close()
+  result.failedModel = qwen.embedding.model
+  const report = Promise.withResolvers()
+  const replacement = open(qwen, profile, report.resolve)
+  assert.match(await report.promise, /重建索引失败/u)
+  assert.equal((await replacement.search({ query: 'alpha', limit: 1 }))[0].documentId, doc.documentId)
+  const database = new DatabaseSync(join(profile, 'data', 'dsh-prism', 'memory.sqlite'))
+  try {
+    const { options } = database.prepare('SELECT options FROM active_index').get()
+    assert.equal(JSON.parse(options).model, bge.embedding.model)
+    assert(!options.includes('do-not-persist-this'))
+  } finally {
+    database.close()
+  }
 })
 
 test('rejects invalid embeddings and retries without exposing a partial document', async t => {
