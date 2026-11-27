@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 import { chunkText } from '../dist/chunks.js'
 import { Memory } from '../dist/memory.js'
@@ -130,4 +131,38 @@ test('rejects invalid embeddings and retries without exposing a partial document
   assert.equal((await memory.get(documentId)).body, draft.body)
   await assert.rejects(memory.stageMedia({ bytes: Uint8Array.of(1), mimeType: 'text/html' }), /不受支持/u)
   await assert.rejects(memory.search({ limit: 1 }), /需要文本或媒体/u)
+})
+
+test('migrates the profile database and retains acknowledged chat media past staging expiry', async t => {
+  const { profile, bge, open } = await fixture(t)
+  const first = open(bge)
+  const input = { bytes: Uint8Array.of(10), mimeType: 'image/png' }
+  const { assetId: retained } = await first.stageMedia(input)
+  const { assetId: expires } = await first.stageMedia(input)
+  await first.close()
+
+  const path = join(profile, 'data', 'dsh-prism', 'memory.sqlite')
+  const legacy = new DatabaseSync(path)
+  try {
+    legacy.exec('ALTER TABLE media DROP COLUMN pinned; PRAGMA user_version = 1')
+  } finally {
+    legacy.close()
+  }
+  const migrated = open(bge)
+  await assert.rejects(migrated.pinMedia([expires, 'missing-asset']), /过期/u)
+  await migrated.pinMedia([retained, retained])
+  await migrated.pinMedia([retained])
+  await migrated.close()
+
+  const clock = new DatabaseSync(path)
+  try {
+    clock.prepare('UPDATE media SET staged_at = ?').run(Date.now() - 2 * 24 * 60 * 60 * 1000)
+  } finally {
+    clock.close()
+  }
+  const reopened = open(bge)
+  await reopened.stageMedia(input)
+  assert.deepEqual(Array.from((await reopened.readMedia(retained)).bytes), [10])
+  assert.equal(await reopened.readMedia(expires), undefined)
+  await assert.rejects(reopened.pinMedia([expires]), /过期/u)
 })

@@ -19,7 +19,7 @@ export class MemoryDatabase {
       this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;')
       this.transaction(() => {
         const version = this.db.prepare('PRAGMA user_version').get()?.user_version
-        if (version !== 0 && version !== 1) {
+        if (version !== 0 && version !== 1 && version !== 2) {
           throw new Error('当前棱镜记忆库版本不受此插件支持')
         }
         this.db.exec(`
@@ -35,7 +35,8 @@ export class MemoryDatabase {
             mime_type TEXT NOT NULL,
             name TEXT,
             bytes BLOB NOT NULL,
-            staged_at INTEGER NOT NULL
+            staged_at INTEGER NOT NULL,
+            pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1))
           ) STRICT;
           CREATE TABLE IF NOT EXISTS attachments (
             document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
@@ -53,8 +54,11 @@ export class MemoryDatabase {
             vector BLOB NOT NULL,
             PRIMARY KEY (fingerprint, document_id, ordinal)
           ) STRICT;
-          PRAGMA user_version = 1;
         `)
+        if (version === 1) {
+          this.db.exec('ALTER TABLE media ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1))')
+        }
+        this.db.exec('PRAGMA user_version = 2')
       })
     } catch (error) {
       this.db.close()
@@ -108,7 +112,7 @@ export class MemoryDatabase {
   stage(assetId: string, input: MediaUpload): MediaReference {
     this.transaction(() => {
       this.db.prepare(`
-        DELETE FROM media WHERE staged_at < ?
+        DELETE FROM media WHERE pinned = 0 AND staged_at < ?
         AND NOT EXISTS (SELECT 1 FROM attachments WHERE asset_id = media.id)
       `).run(Date.now() - mediaLifetime)
       this.db.prepare('INSERT INTO media (id, mime_type, name, bytes, staged_at) VALUES (?, ?, ?, ?, ?)')
@@ -120,9 +124,24 @@ export class MemoryDatabase {
   readMedia(assetId: string): StoredMedia | undefined {
     const row = this.db.prepare(`
       SELECT mime_type, name, bytes FROM media
-      WHERE id = ? AND (staged_at >= ? OR EXISTS (SELECT 1 FROM attachments WHERE asset_id = media.id))
+      WHERE id = ? AND (pinned = 1 OR staged_at >= ? OR EXISTS (SELECT 1 FROM attachments WHERE asset_id = media.id))
     `).get(assetId, Date.now() - mediaLifetime) as { mime_type: string; name: string | null; bytes: Uint8Array } | undefined
     return row && { assetId, mimeType: row.mime_type, bytes: row.bytes, ...(row.name !== null && { name: row.name }) }
+  }
+
+  pinMedia(assetIds: readonly string[]): void {
+    this.transaction(() => {
+      const pin = this.db.prepare(`
+        UPDATE media SET pinned = 1
+        WHERE id = ? AND (pinned = 1 OR staged_at >= ? OR EXISTS (SELECT 1 FROM attachments WHERE asset_id = media.id))
+      `)
+      const threshold = Date.now() - mediaLifetime
+      for (const id of assetIds) {
+        if (pin.run(id, threshold).changes !== 1) {
+          throw new Error('找不到此媒体或暂存已过期')
+        }
+      }
+    })
   }
 
   save(doc: MemoryDocument, requestKey: string, digest: string, fingerprint: string, fragments: Fragment[]): string {

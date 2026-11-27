@@ -106,6 +106,18 @@ export class Memory implements PrismMemory {
     return this.run(() => this.database.readMedia(boundedText(assetId, 100, 'assetId')))
   }
 
+  pinMedia(assetIds: readonly string[]): Promise<void> {
+    return this.run(() => {
+      const ids = [...new Set(assetIds.map(id => boundedText(id, 100, 'assetId')))]
+      if (ids.length > 16) {
+        throw new Error('一次最多可保留 16 个媒体附件')
+      }
+      if (ids.length) {
+        this.database.pinMedia(ids)
+      }
+    })
+  }
+
   private media(assetId: string) {
     const asset = this.database.readMedia(assetId)
     if (!asset) {

@@ -41,5 +41,6 @@ export interface PrismMemory {
   get(documentId: string): Promise<MemoryDocument | undefined>
   write(draft: MemoryDraft, idempotencyKey: string): Promise<{ documentId: string }>
   stageMedia(input: MediaUpload): Promise<MediaReference>
+  pinMedia?(assetIds: readonly string[]): Promise<void>
   readMedia(assetId: string): Promise<(MediaReference & { bytes: Uint8Array }) | undefined>
 }
