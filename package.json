@@ -1,6 +1,6 @@
 {
   "name": "@dsh-prism/dsh-memory",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Search and write Prism memories across workspaces with SQLite and local or remote embeddings.",
   "type": "module",
   "main": "./dist/index.js",
