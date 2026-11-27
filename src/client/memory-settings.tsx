@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
-import { Arco, Scrollbar, Select } from '@dsh-plugin/dsh-loader/client'
+import { Arco, DshMenu, Icon, Scrollbar } from '@dsh-plugin/dsh-loader/client'
 import { memoryCopy } from './copy.js'
 import {
   requestSettings, type BindingRequest, type BindingStatus, type DownloadProgress,
@@ -69,6 +69,7 @@ export function MemorySettingsPage({ language }: { language: string }) {
   const [state, setState] = useState<MemorySettings>()
   const [sourceDraft, setSource] = useState<ModelSource>('local')
   const [localDraft, setLocal] = useState(localModels[0])
+  const [modelMenu, setModelMenu] = useState<'top' | 'bottom'>()
   const [remoteDraft, setRemote] = useState(emptyRemote)
   const [confirmation, setConfirmation] = useState<BindingRequest>()
   const [refresh, setRefresh] = useState(0)
@@ -202,11 +203,30 @@ export function MemorySettingsPage({ language }: { language: string }) {
         source, modelId: remoteModel.trim(), baseUrl: remoteBase.trim(), apiKey: remoteDraft.apiKey,
       })
     }}>
-      {source === 'local' ? <label style={fieldStyle}>
-        {copy.model}
-        <Select value={localModel} options={modelChoices.map(model => ({ value: model, label: model }))}
-          onChange={event => setLocal(event.currentTarget.value)} disabled={disabled} />
-      </label> : <>
+      {source === 'local' ? <div style={fieldStyle}>
+        <span>{copy.model}</span>
+        <DshMenu portal open={modelMenu !== undefined && !disabled} side={modelMenu} selectedId={localModel}
+          items={modelChoices.map(model => ({ id: model, label: model }))} onClose={() => setModelMenu(undefined)}
+          onSelect={model => {
+            setModelMenu(undefined)
+            if (!disabled && modelChoices.includes(model)) {
+              setLocal(model)
+            }
+          }} anchor={<button type="button" aria-label={`${copy.model} ${localModel}`} aria-haspopup="menu"
+            aria-expanded={modelMenu !== undefined && !disabled} disabled={disabled}
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10,
+              padding: '6px 12px', minHeight: 36, width: '100%', border: 0, borderRadius: 'var(--dsw-radius-md, 8px)',
+              background: 'var(--dsw-alias-bg-module-platform, var(--color-fill-2))',
+              color: 'var(--dsw-alias-label-primary, inherit)', font: 'inherit', opacity: disabled ? 0.55 : 1,
+              cursor: disabled ? 'not-allowed' : 'pointer' }}
+            onClick={event => {
+              const rect = event.currentTarget.getBoundingClientRect()
+              const below = window.innerHeight - rect.bottom
+              setModelMenu(modelMenu === undefined ? below < Math.min(180, rect.top) ? 'top' : 'bottom' : undefined)
+            }}>
+            {localModel}<Icon name="ChevronDown" size={14} />
+          </button>} />
+      </div> : <>
         <label style={fieldStyle}>
           BASE_URL
           <Arco.Input type="url" inputMode="url" autoComplete="off" value={remoteBase} disabled={disabled}
